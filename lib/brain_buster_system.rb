@@ -1,4 +1,5 @@
 require 'digest/sha2'
+require 'crypt/blowfish'
 # Controller level system that actually does the work of creating and validating
 # the captcha via filters, and also providing helpers for determining if the captcha was already
 # passed or if a previous captcha attempt failed.
@@ -24,7 +25,11 @@ module BrainBusterSystem
     raise_if_salt_isnt_set
     return true if (captcha_passed? || !brain_buster_enabled)
     debug_brain_buster { "Initializing the brain_buster object."}
-    assigns[:captcha] = find_brain_buster
+    current_captcha = find_brain_buster
+    assigns[:captcha] = current_captcha
+    # Encrypt the question id in a way that changes on every page load to prevent bots from storing the answers
+    encrypted_captcha_id = rencrypt(current_captcha.id) 
+    assigns[:captcha_id] = encrypted_captcha_id
   end
   
   # Ensure that the answer attempt from the params successfully passes the captcha.
@@ -34,9 +39,10 @@ module BrainBusterSystem
   def validate_brain_buster
     raise_if_salt_isnt_set 
     return true if (captcha_passed? || !brain_buster_enabled)
-    return captcha_failure unless (params[:captcha_id] && params[:captcha_answer])
+    return captcha_failure unless (rdecrypt(params[:captcha_id]) && params[:captcha_answer])
       
     captcha = assigns[:captcha] = find_brain_buster
+    assigns[:captcha_id] = rencrypt(captcha.id)
     is_success = captcha.attempt?(params[:captcha_answer])
     debug_brain_buster { is_success ? "Captcha successfully passed." : "Captcha failed - #{ captcha.inspect }" }
     set_captcha_status(is_success)
@@ -48,9 +54,30 @@ module BrainBusterSystem
     Digest::SHA256.hexdigest("--#{str}--#{salt}--")
   end
 
+  # Reversible encryption for the captcha & captcha_id
+  # Based on blowfish. Randomly changes each time it is used, which prevents bots from storing the answers
+  def self.rencrypt(value, key=@@brain_buster_salt)
+    raise "nil value" if value.blank?
+    blowfish = Crypt::Blowfish.new(key)
+    encrypted_string = blowfish.encrypt_string(value.to_s)
+    Base64.encode64(encrypted_string).strip
+  end
+
+  # Reversing the encryption for the captcha & captcha_id
+  def self.rdecrypt(value, key=@@brain_buster_salt)
+    return nil if value.blank?
+    begin
+      blowfish = Crypt::Blowfish.new(key)
+      value = Base64.decode64(value)
+      blowfish.decrypt_string(value)
+    rescue
+      return nil # the decryption routine is sensitive to invalid strings so rescue errors
+    end
+  end
+  
   # Has the user already passed the captcha, signifying we can trust them?
   def captcha_passed?
-    cookies[:captcha_status] == encrypt("passed")
+    cookies[:captcha_status] && (rdecrypt(cookies[:captcha_status]) == "passed")
   end
   alias :captcha_previously_passed? :captcha_passed?
   
@@ -65,7 +92,7 @@ module BrainBusterSystem
   # Override if you want to store the flag signaling a "safe" user somewhere else, of if you don't want to
   # store it at all (and therefore will challenge users each and every time.)
   def captcha_success
-    true
+    flash[:failed_captcha] = nil && flash[:captcha_error] = nil and return true
   end
   
   # Callback for when the captcha failed.
@@ -84,15 +111,16 @@ module BrainBusterSystem
   end
   
   def set_captcha_failure_message
-    flash[:error] = brain_buster_failure_message
+    # flash[:error] = brain_buster_failure_message
+    flash[:captcha_error] = brain_buster_failure_message
   end
   
   # Save the status of the current captcha, to see if we can bypass the captcha on future requests (if this was successful)
   # or if we need to re-render the same captcha on the next request (for failures).
   def set_captcha_status(is_success)
     status = is_success ? "passed" : "failed"
-    flash[:failed_captcha] = params[:captcha_id] unless is_success
-    cookies[:captcha_status] = encrypt(status)
+    flash[:failed_captcha] = params[:captcha_id] unless is_success # this value is already encrypted
+    cookies[:captcha_status] = rencrypt(status)
   end
 
   # We raise an exception immediately if the brain_buster_salt isn't set.
@@ -102,7 +130,7 @@ module BrainBusterSystem
   
   # Find a captcha either from an id in the params or the flash, or just find a random captcha
   def find_brain_buster
-    BrainBuster.find_random_or_previous(params[:captcha_id] || flash[:failed_captcha])
+    BrainBuster.find_random_or_previous(rdecrypt(params[:captcha_id]) || rdecrypt(flash[:failed_captcha]))
   end
   
   private
@@ -114,6 +142,14 @@ module BrainBusterSystem
   
   def encrypt(str)
     BrainBusterSystem.encrypt(str, brain_buster_salt)
+  end
+  
+  def rencrypt(str)
+    BrainBusterSystem.rencrypt(str, brain_buster_salt)
+  end
+
+  def rdecrypt(str)
+    BrainBusterSystem.rdecrypt(str, brain_buster_salt)
   end
   
 end
