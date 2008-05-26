@@ -77,13 +77,13 @@ module BrainBusterSystem
   
   # Has the user already passed the captcha, signifying we can trust them?
   def captcha_passed?
-    cookies[:captcha_status] && (rdecrypt(cookies[:captcha_status]) == "passed")
+    (cookies[:captcha_status] && (rdecrypt(cookies[:captcha_status]) == "passed")) ? true : false
   end
   alias :captcha_previously_passed? :captcha_passed?
   
   # Determine if the last (and only the last) captcha attempt failed
   def last_captcha_attempt_failed?
-    flash[:failed_captcha]
+    flash[:failed_captcha] ? true : false
   end
   
   protected
